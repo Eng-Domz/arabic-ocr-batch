@@ -96,7 +96,8 @@ def page_text(path: Path) -> str:
             first = ordered[0]
             speaker_like = first.x >= page_width * 0.70 and first.width <= page_width * 0.18
             if speaker_like:
-                parts[0] = f"{first.text.rstrip(':\u061b ')}:"
+                speaker = first.text.rstrip(":؛ ")
+                parts[0] = f"{speaker}:"
                 if len(parts) > 1:
                     parts[1] = parts[1].lstrip(":\u061b ")
         output.append(" ".join(parts))
