@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Arabic OCR Studio</title>
+  <style>
+    :root { color-scheme: light; --ink:#18211b; --muted:#64706a; --paper:#f4f1e9; --card:#fffdf7; --green:#1f6d4b; --line:#d9d3c4; --yellow:#ffe59a; --red:#ffc4bd; }
+    * { box-sizing:border-box } body { margin:0; font-family:Inter,Segoe UI,Tahoma,Arial,sans-serif; color:var(--ink); background:linear-gradient(135deg,#e8efe7,#f5efe3 60%,#e8e4d7); min-height:100vh }
+    header { padding:32px max(24px,calc((100vw - 1200px)/2)); background:#173d31; color:white }
+    h1 { margin:0 0 6px; font-size:clamp(28px,5vw,46px); letter-spacing:-1px } header p { margin:0; color:#cfe1d7 }
+    main { max-width:1200px; margin:28px auto; padding:0 20px 60px; display:grid; gap:22px }
+    .card { background:var(--card); border:1px solid rgba(100,90,70,.18); border-radius:18px; padding:22px; box-shadow:0 12px 35px rgba(50,45,30,.08) }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px } .wide { grid-column:1/-1 }
+    label { display:block; font-weight:700; margin-bottom:7px } input[type=text],input[type=file] { width:100%; padding:12px; border:1px solid var(--line); border-radius:10px; background:white; font-size:16px }
+    .drop { border:2px dashed #89a398; padding:24px; border-radius:14px; text-align:center; background:#f8fbf8 }
+    button,.button { appearance:none; border:0; border-radius:10px; padding:11px 18px; background:var(--green); color:white; font-weight:750; cursor:pointer; text-decoration:none; display:inline-block }
+    button.secondary { background:#e5ebe7; color:#244a3a } button:disabled { opacity:.55; cursor:not-allowed }
+    .help,.muted { color:var(--muted); font-size:14px } .hidden { display:none!important }
+    .progress { height:12px; background:#e4e1d9; border-radius:99px; overflow:hidden; margin:12px 0 } .progress span { display:block; height:100%; width:0; background:linear-gradient(90deg,#2d805c,#75ad75); transition:width .35s }
+    .status-row { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap }
+    .pill { padding:5px 10px; border-radius:99px; background:#e8eee9; font-size:13px; font-weight:700 }.pill.failed{background:var(--red)}.pill.complete{background:#cdebd7}
+    .outputs { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px }
+    .review-head { display:flex; gap:12px; flex-wrap:wrap; align-items:center; justify-content:space-between }.legend span { padding:4px 8px; border-radius:5px; margin-left:6px; font-size:13px }.yellow{background:var(--yellow)}.red{background:var(--red)}
+    .page-review { display:grid; grid-template-columns:minmax(280px,46%) 1fr; gap:18px; border-top:1px solid var(--line); padding-top:20px; margin-top:20px }.page-review img{width:100%;max-height:680px;object-fit:contain;background:#eee;border-radius:9px}.ocr-text{direction:rtl;text-align:right;font-family:Tahoma,Arial,sans-serif;font-size:20px;line-height:1.9;max-height:680px;overflow:auto;padding:15px;border:1px solid var(--line);border-radius:9px;background:white}.ocr-line{margin-bottom:4px}.token{padding:1px 2px;border-radius:3px}.speaker{font-weight:800}
+    .empty { text-align:center; padding:30px; color:var(--muted) }
+    @media(max-width:760px){.grid,.page-review{grid-template-columns:1fr}.page-review img,.ocr-text{max-height:520px}}
+  </style>
+</head>
+<body>
+<header><h1>Arabic OCR Studio</h1><p>Private, local OCR with page selection and confidence review.</p></header>
+<main>
+  <section class="card">
+    <h2>1. Choose a PDF</h2>
+    <div class="drop"><input id="pdf" type="file" accept="application/pdf,.pdf"><p id="uploadStatus" class="muted">Your original file is never changed.</p></div>
+  </section>
+  <section id="options" class="card hidden">
+    <h2>2. Choose what to process</h2>
+    <div class="grid">
+      <div><label for="pages">Pages</label><input id="pages" type="text" value="all"><div id="pageHelp" class="help"></div></div>
+      <div><label for="outputName">Output name</label><input id="outputName" type="text"></div>
+      <div class="wide"><label><input id="searchable" type="checkbox"> Also create a searchable PDF (adds extra processing time)</label><div class="help">The high-accuracy TXT uses PP-OCRv6. The searchable PDF uses OCRmyPDF/Tesseract.</div></div>
+      <div class="wide"><button id="start">Start OCR</button> <button id="notifications" class="secondary" type="button">Enable finish notification</button></div>
+    </div>
+  </section>
+  <section id="current" class="card hidden">
+    <div class="status-row"><div><h2 id="jobName" style="margin:0"></h2><div id="stage" class="muted"></div></div><span id="statusPill" class="pill"></span></div>
+    <div class="progress"><span id="bar"></span></div><div id="message"></div><div id="outputs" class="outputs"></div>
+    <button id="retry" class="secondary hidden" style="margin-top:14px">Retry / resume</button>
+  </section>
+  <section id="review" class="card hidden">
+    <div class="review-head"><div><h2 style="margin:0">Confidence review</h2><p id="reviewSummary" class="muted"></p></div><div class="legend"><span class="yellow">Check</span><span class="red">Urgent review</span></div></div>
+    <div id="reviewPages"></div>
+  </section>
+  <section class="card"><div class="review-head"><h2 style="margin:0">Recent jobs</h2><button id="refresh" class="secondary">Refresh</button></div><div id="jobs" class="empty">No jobs yet.</div></section>
+</main>
+<script>
+let upload=null,currentId=null,timer=null,lastStatus=null;
+const $=id=>document.getElementById(id);
+async function api(url,options={}){const r=await fetch(url,options);const data=await r.json();if(!r.ok)throw new Error(data.error||'Request failed');return data}
+function errorMessage(e){$('uploadStatus').textContent='Error: '+e.message;$('uploadStatus').style.color='#9b2c22'}
+$('pdf').addEventListener('change',async()=>{const file=$('pdf').files[0];if(!file)return;try{$('uploadStatus').textContent='Copying and checking PDF…';$('options').classList.add('hidden');const r=await fetch('/api/upload?name='+encodeURIComponent(file.name),{method:'POST',headers:{'Content-Type':'application/pdf'},body:file});const data=await r.json();if(!r.ok)throw new Error(data.error);upload=data;$('uploadStatus').textContent=`Ready: ${data.filename} — ${data.page_count} pages`;$('uploadStatus').style.color='';$('pageHelp').textContent=`Use “all” or ranges such as 1-5,8,10-12. Valid pages: 1-${data.page_count}.`;$('outputName').value=data.suggested_name;$('options').classList.remove('hidden')}catch(e){errorMessage(e)}});
+$('notifications').onclick=async()=>{if(!('Notification'in window))return alert('Notifications are not supported by this browser.');const p=await Notification.requestPermission();$('notifications').textContent=p==='granted'?'Notifications enabled':'Notifications not enabled'};
+$('start').onclick=async()=>{if(!upload)return;try{$('start').disabled=true;const job=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_id:upload.upload_id,pages:$('pages').value,output_name:$('outputName').value,create_searchable_pdf:$('searchable').checked})});watch(job.id)}catch(e){alert(e.message);$('start').disabled=false}};
+function renderJob(job){currentId=job.id;$('current').classList.remove('hidden');$('jobName').textContent=job.name;$('stage').textContent=job.stage;$('message').textContent=job.message;$('bar').style.width=(job.progress||0)+'%';$('statusPill').textContent=job.status;$('statusPill').className='pill '+job.status;$('outputs').innerHTML=(job.outputs||[]).map(o=>`<a class="button" href="/api/jobs/${job.id}/download/${encodeURIComponent(o.name)}">${escapeHtml(o.label)}</a>`).join('');$('retry').classList.toggle('hidden',!['failed','complete'].includes(job.status));if(job.status==='complete')loadReview(job.id);if(lastStatus==='running'&&['complete','failed'].includes(job.status)&&'Notification'in window&&Notification.permission==='granted')new Notification(job.status==='complete'?'Arabic OCR finished':'Arabic OCR needs attention',{body:job.message});lastStatus=job.status}
+async function watch(id){clearInterval(timer);const poll=async()=>{try{const job=await api('/api/jobs/'+id);renderJob(job);loadJobs();if(['complete','failed'].includes(job.status)){clearInterval(timer);$('start').disabled=false}}catch(e){$('message').textContent=e.message}};await poll();timer=setInterval(poll,1800)}
+$('retry').onclick=async()=>{try{await api(`/api/jobs/${currentId}/retry`,{method:'POST'});watch(currentId)}catch(e){alert(e.message)}};
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function loadReview(id){try{const report=await api(`/api/jobs/${id}/review`);$('review').classList.remove('hidden');$('reviewSummary').textContent=`${report.summary.pages} pages · ${report.summary.yellow} words to check · ${report.summary.red} urgent review words`;const flagged=report.pages.filter(p=>p.yellow||p.red);$('reviewPages').innerHTML=(flagged.length?flagged:report.pages.slice(0,1)).map(p=>{const rows=p.rows.map(row=>`<div class="ocr-line ${row.speaker_like?'speaker':''}">${row.lines.map(line=>line.tokens.map(t=>`<span class="token ${t.level}" title="Confidence ${Math.round(t.confidence*100)}%">${escapeHtml(t.text)}</span>`).join(' ')).join(' ')}</div>`).join('');return `<article class="page-review"><div><h3>PDF page ${p.number}</h3><img loading="lazy" src="/api/jobs/${id}/page/${p.number}"></div><div class="ocr-text">${rows}</div></article>`}).join('')}catch(e){console.error(e)}}
+async function loadJobs(){try{const data=await api('/api/jobs');$('jobs').className='';$('jobs').innerHTML=data.jobs.length?data.jobs.map(j=>`<div class="status-row" style="padding:12px 0;border-bottom:1px solid #e6e0d4"><div><strong>${escapeHtml(j.name)}</strong><div class="muted">${escapeHtml(j.message||'')}</div></div><a class="button" href="/?job=${j.id}">Open</a></div>`).join(''):'<div class="empty">No jobs yet.</div>'}catch(e){$('jobs').textContent=e.message}}
+$('refresh').onclick=loadJobs;loadJobs();const requestedJob=new URLSearchParams(location.search).get('job');if(/^[a-f0-9]{12}$/.test(requestedJob||''))watch(requestedJob);
+</script>
+</body>
+</html>

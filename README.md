@@ -16,6 +16,40 @@ Additional documentation:
 No open-source license has been selected yet. The absence of a license means
 the code is not automatically granted redistribution or modification rights.
 
+## Local browser interface
+
+The project includes a private local interface for the high-accuracy workflow.
+It accepts a PDF copy, validates page ranges, runs PP-OCRv6, saves UTF-8 text,
+and shows a page-by-page review screen. Words below 80% model confidence are
+yellow; words below 60% are red. Confidence is a review aid, not a guarantee:
+an unmarked word can still be wrong.
+
+From WSL Ubuntu in the project folder:
+
+```bash
+PYTHONPATH=src python3 -m arabic_ocr_batch.web_ui
+```
+
+On Windows, you can instead double-click `start-ui.cmd` in the project folder.
+
+Open <http://127.0.0.1:8765> if the browser does not open automatically. Keep
+the Ubuntu terminal open during OCR. The interface supports page selections
+such as `1-10,15,20-25`, live progress, retry/resume after a failed run,
+browser completion notifications, downloadable high-accuracy TXT and review
+JSON, and an optional searchable PDF. Outputs are saved below `output/ui/`;
+uploaded working copies and rendered pages remain ignored by Git. The original
+PDF selected in the browser is never changed.
+
+The interface expects the model layout used by the documented Kraken setup:
+
+```text
+~/.local/share/arabic-ocr-batch/models/AOCP_print_models/layout/layout-20210711_AQ.mlmodel
+~/.local/share/arabic-ocr-batch/models/ppocrv6/medium.safetensors
+```
+
+Override these with `ARABIC_OCR_LAYOUT_MODEL`,
+`ARABIC_OCR_RECOGNITION_MODEL`, or `ARABIC_OCR_KRAKEN` when needed.
+
 ## Supported local setup
 
 The intended Windows setup is WSL2 with Ubuntu and Python 3.11 or newer. Keep models and virtual environments in the Linux filesystem for speed, while input and published output may remain below the Windows project directory. Run `doctor` after installation to verify the actual machine rather than relying on a saved status in this README.
