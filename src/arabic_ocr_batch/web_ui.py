@@ -4,9 +4,11 @@ import argparse
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -39,6 +41,10 @@ RED_THRESHOLD = 0.60
 
 
 class UIError(ValueError):
+    pass
+
+
+class JobCancelled(RuntimeError):
     pass
 
 
@@ -120,6 +126,7 @@ def _review_page(path: Path, page_number: int) -> dict[str, object]:
     root = ET.parse(path).getroot()
     page_element = next((e for e in root.iter() if _local_name(e.tag) == "Page"), None)
     page_width = int(page_element.attrib.get("WIDTH", "0")) if page_element is not None else 0
+    page_height = int(page_element.attrib.get("HEIGHT", "0")) if page_element is not None else 0
     lines: list[ReviewLine] = []
     all_confidences: list[float] = []
     yellow = red = 0
@@ -137,18 +144,26 @@ def _review_page(path: Path, page_number: int) -> dict[str, object]:
                 confidence = float(child.attrib.get("WC", "1"))
             except ValueError:
                 confidence = 1.0
-            reviewable = any(character.isalnum() for character in text)
-            level = "ok"
-            if reviewable and confidence < RED_THRESHOLD:
-                level = "red"
-                red += 1
-            elif reviewable and confidence < YELLOW_THRESHOLD:
-                level = "yellow"
-                yellow += 1
             all_confidences.append(confidence)
-            tokens.append({"text": text, "confidence": round(confidence, 3), "level": level})
+            tokens.append({"text": text, "confidence": round(confidence, 3), "level": "ok"})
         if not tokens or " ".join(str(t["text"]) for t in tokens).casefold() == "ss":
             continue
+        line_text = " ".join(str(token["text"]) for token in tokens)
+        line_y = int(element.attrib.get("VPOS", "0"))
+        page_number_line = bool(
+            page_height
+            and line_y < page_height * 0.25
+            and re.fullmatch(r"[\s\-—–_]*[0-9٠-٩۰-۹]+[\s\-—–_]*", line_text)
+        )
+        for token in tokens:
+            confidence = float(token["confidence"])
+            reviewable = not page_number_line and any(character.isalnum() for character in str(token["text"]))
+            if reviewable and confidence < RED_THRESHOLD:
+                token["level"] = "red"
+                red += 1
+            elif reviewable and confidence < YELLOW_THRESHOLD:
+                token["level"] = "yellow"
+                yellow += 1
         lines.append(
             ReviewLine(
                 x=int(element.attrib.get("HPOS", "0")),
@@ -226,6 +241,8 @@ class JobManager:
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.jobs: dict[str, dict[str, object]] = {}
+        self.cancel_events: dict[str, threading.Event] = {}
+        self.active_processes: dict[str, subprocess.Popen[object]] = {}
         for directory in (UPLOAD_DIR, JOB_ROOT, OUTPUT_ROOT, STATE_ROOT):
             directory.mkdir(parents=True, exist_ok=True)
         self._load_jobs()
@@ -236,7 +253,7 @@ class JobManager:
                 job = json.loads(state_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            if job.get("status") == "running":
+            if job.get("status") in {"running", "cancelling"}:
                 job["status"] = "failed"
                 job["message"] = "The interface stopped during this job. Press Retry to resume it."
             self.jobs[str(job["id"])] = job
@@ -245,7 +262,7 @@ class JobManager:
     def _public(self, job: dict[str, object]) -> dict[str, object]:
         allowed = (
             "id", "name", "status", "stage", "message", "progress", "completed_pages",
-            "total_pages", "pages", "outputs", "review", "created_at",
+            "total_pages", "pages", "outputs", "review", "created_at", "eta_seconds", "workers",
         )
         return {key: job.get(key) for key in allowed}
 
@@ -275,6 +292,12 @@ class JobManager:
     def create(self, source: Path, page_count: int, payload: dict[str, object]) -> dict[str, object]:
         pages = parse_page_selection(str(payload.get("pages", "all")), page_count)
         output_name = safe_output_name(str(payload.get("output_name") or source.stem))
+        try:
+            workers = int(payload.get("workers", 2))
+        except (TypeError, ValueError) as exc:
+            raise UIError("CPU workers must be a number from 1 to 3.") from exc
+        if workers not in {1, 2, 3}:
+            raise UIError("CPU workers must be 1, 2, or 3.")
         job_id = uuid.uuid4().hex[:12]
         job: dict[str, object] = {
             "id": job_id,
@@ -288,45 +311,150 @@ class JobManager:
             "total_pages": len(pages),
             "pages": pages,
             "create_searchable_pdf": bool(payload.get("create_searchable_pdf", False)),
+            "workers": workers,
+            "eta_seconds": None,
             "outputs": [],
             "review": None,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
         with self.lock:
-            if any(existing.get("status") == "running" for existing in self.jobs.values()):
+            if any(existing.get("status") in {"queued", "running", "cancelling"} for existing in self.jobs.values()):
                 raise UIError("Another OCR job is running. Wait for it to finish before starting another.")
             self.jobs[job_id] = job
+            self.cancel_events[job_id] = threading.Event()
             self._save(job)
         threading.Thread(target=self._run, args=(job,), daemon=True, name=f"ocr-{job_id}").start()
         return self._public(job)
 
     def retry(self, job_id: str) -> dict[str, object]:
         with self.lock:
-            if any(existing.get("status") == "running" for existing in self.jobs.values()):
+            if any(existing.get("status") in {"queued", "running", "cancelling"} for existing in self.jobs.values()):
                 raise UIError("Another OCR job is running.")
             try:
                 job = self.jobs[job_id]
             except KeyError as exc:
                 raise UIError("Unknown job.") from exc
-            if job.get("status") not in {"failed", "complete"}:
-                raise UIError("Only completed or failed jobs can be retried.")
-            job.update(status="queued", stage="Waiting", message="Queued for retry")
+            if job.get("status") not in {"failed", "complete", "cancelled"}:
+                raise UIError("Only completed, cancelled, or failed jobs can be retried.")
+            job.update(status="queued", stage="Waiting", message="Queued for retry", eta_seconds=None)
+            self.cancel_events[job_id] = threading.Event()
             self._save(job)
         threading.Thread(target=self._run, args=(job,), daemon=True, name=f"ocr-{job_id}").start()
         return self._public(job)
 
+    def cancel(self, job_id: str) -> dict[str, object]:
+        with self.lock:
+            try:
+                job = self.jobs[job_id]
+            except KeyError as exc:
+                raise UIError("Unknown job.") from exc
+            if job.get("status") not in {"queued", "running", "cancelling"}:
+                raise UIError("This job is not running.")
+            event = self.cancel_events.setdefault(job_id, threading.Event())
+            event.set()
+            job.update(status="cancelling", stage="Stopping", message="Stopping OCR safely…", eta_seconds=None)
+            process = self.active_processes.get(job_id)
+            self._save(job)
+        if process is not None:
+            self._terminate_process(process)
+        return self._public(job)
+
+    def save_reviewed_text(self, job_id: str, text: object) -> dict[str, object]:
+        if not isinstance(text, str):
+            raise UIError("Reviewed text must be a string.")
+        if len(text.encode("utf-8")) > 20 * 1024 * 1024:
+            raise UIError("Reviewed text exceeds the 20 MiB limit.")
+        with self.lock:
+            try:
+                job = self.jobs[job_id]
+            except KeyError as exc:
+                raise UIError("Unknown job.") from exc
+            if job.get("status") != "complete":
+                raise UIError("OCR must finish before reviewed text can be saved.")
+            output_dir = OUTPUT_ROOT / job_id
+            output_dir.mkdir(parents=True, exist_ok=True)
+            name = f"{job['name']} - reviewed.txt"
+            destination = output_dir / name
+            temporary = destination.with_suffix(".tmp")
+            temporary.write_text(text, encoding="utf-8")
+            temporary.replace(destination)
+            outputs = list(job.get("outputs") or [])
+            if not any(isinstance(item, dict) and item.get("name") == name for item in outputs):
+                outputs.append({"label": "Reviewed text", "name": name})
+            job["outputs"] = outputs
+            self._save(job)
+            return self._public(job)
+
+    def _cancel_event(self, job: dict[str, object]) -> threading.Event:
+        return self.cancel_events.setdefault(str(job["id"]), threading.Event())
+
+    def _raise_if_cancelled(self, job: dict[str, object]) -> None:
+        if self._cancel_event(job).is_set():
+            raise JobCancelled("OCR cancelled by the user.")
+
+    def _register_process(self, job: dict[str, object], process: subprocess.Popen[object]) -> None:
+        with self.lock:
+            self.active_processes[str(job["id"])] = process
+
+    def _clear_process(self, job: dict[str, object], process: subprocess.Popen[object]) -> None:
+        with self.lock:
+            if self.active_processes.get(str(job["id"])) is process:
+                self.active_processes.pop(str(job["id"]), None)
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[object]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+            process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except OSError:
+                pass
+
     def _command(self, job: dict[str, object], command: list[str], stage: str) -> None:
+        self._raise_if_cancelled(job)
         self._update(job, stage=stage, message=stage)
-        result = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True, errors="replace")
-        if result.returncode:
-            detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
-            raise RuntimeError(f"{stage} failed: {detail[-3000:]}")
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as captured:
+            process = subprocess.Popen(
+                command,
+                cwd=PROJECT_ROOT,
+                stdout=captured,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                start_new_session=True,
+            )
+            self._register_process(job, process)
+            try:
+                while process.poll() is None:
+                    if self._cancel_event(job).wait(0.2):
+                        self._terminate_process(process)
+                        raise JobCancelled("OCR cancelled by the user.")
+                return_code = process.wait()
+            finally:
+                self._clear_process(job, process)
+            if self._cancel_event(job).is_set():
+                raise JobCancelled("OCR cancelled by the user.")
+            if return_code:
+                captured.seek(0)
+                detail = (captured.read() or f"exit {return_code}").strip()
+                raise RuntimeError(f"{stage} failed: {detail[-3000:]}")
 
     def _render_pages(self, job: dict[str, object], pages_dir: Path) -> None:
         source = Path(str(job["source"]))
         pages = [int(page) for page in job["pages"]]  # type: ignore[index]
         pages_dir.mkdir(parents=True, exist_ok=True)
         for index, page in enumerate(pages, start=1):
+            self._raise_if_cancelled(job)
             target = pages_dir / f"page-{page:04d}.png"
             if not target.exists() or target.stat().st_size == 0:
                 self._command(
@@ -368,30 +496,48 @@ class JobManager:
             alto_dir.mkdir(parents=True, exist_ok=True)
             runner = PROJECT_ROOT / "scripts" / "run_kraken_batch.py"
             with log_path.open("a", encoding="utf-8") as log:
+                existing_completed = sum(1 for path in alto_dir.glob("*.alto.xml") if path.stat().st_size)
+                recognition_started = time.monotonic()
                 process = subprocess.Popen(
                     [
                         sys.executable, str(runner), "--kraken", str(kraken), "--pages", str(pages_dir),
                         "--output", str(alto_dir), "--layout-model", str(layout),
                         "--recognition-model", str(recognition), "--threads", "2",
-                        "--line-batch-size", "1", "--workers", "3",
+                        "--line-batch-size", "1", "--workers", str(job.get("workers", 2)),
                     ],
                     cwd=PROJECT_ROOT,
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     text=True,
                     errors="replace",
+                    start_new_session=True,
                 )
-                while process.poll() is None:
-                    completed = sum(1 for path in alto_dir.glob("*.alto.xml") if path.stat().st_size)
-                    total = int(job["total_pages"])
-                    self._update(
-                        job,
-                        completed_pages=completed,
-                        progress=22 + round(completed / max(1, total) * 63),
-                        message=f"Recognized {completed} of {total} pages",
-                    )
-                    time.sleep(0.5)
-                return_code = process.wait()
+                self._register_process(job, process)
+                try:
+                    while process.poll() is None:
+                        if self._cancel_event(job).is_set():
+                            self._terminate_process(process)
+                            raise JobCancelled("OCR cancelled by the user.")
+                        completed = sum(1 for path in alto_dir.glob("*.alto.xml") if path.stat().st_size)
+                        total = int(job["total_pages"])
+                        elapsed = time.monotonic() - recognition_started
+                        newly_completed = max(0, completed - existing_completed)
+                        eta_seconds = None
+                        if newly_completed and elapsed >= 1:
+                            eta_seconds = round((total - completed) * elapsed / newly_completed)
+                        self._update(
+                            job,
+                            completed_pages=completed,
+                            progress=22 + round(completed / max(1, total) * 63),
+                            message=f"Recognized {completed} of {total} pages",
+                            eta_seconds=eta_seconds,
+                        )
+                        time.sleep(0.5)
+                    return_code = process.wait()
+                finally:
+                    self._clear_process(job, process)
+            if self._cancel_event(job).is_set():
+                raise JobCancelled("OCR cancelled by the user.")
             if return_code:
                 raise RuntimeError(f"Kraken OCR failed with exit code {return_code}. See {log_path}.")
 
@@ -443,16 +589,34 @@ class JobManager:
                 completed_pages=job["total_pages"],
                 outputs=outputs,
                 review=review,
+                eta_seconds=0,
+            )
+        except JobCancelled:
+            completed = sum(1 for path in alto_dir.glob("*.alto.xml") if path.stat().st_size)
+            self._update(
+                job,
+                status="cancelled",
+                stage="Cancelled",
+                message=f"Cancelled safely — {completed} completed page(s) kept for resume",
+                completed_pages=completed,
+                eta_seconds=None,
             )
         except Exception as exc:
-            self._update(job, status="failed", stage="Needs attention", message=str(exc), progress=job.get("progress", 0))
+            self._update(
+                job,
+                status="failed",
+                stage="Needs attention",
+                message=str(exc),
+                progress=job.get("progress", 0),
+                eta_seconds=None,
+            )
 
 
 MANAGER = JobManager()
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ArabicOCRLocal/0.1"
+    server_version = "ArabicOCRLocal/0.2"
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -469,9 +633,9 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, exc: Exception, status: int = 400) -> None:
         self._json({"error": str(exc)}, status)
 
-    def _read_json(self) -> dict[str, object]:
+    def _read_json(self, max_bytes: int = 1_000_000) -> dict[str, object]:
         length = int(self.headers.get("Content-Length", "0"))
-        if length < 1 or length > 1_000_000:
+        if length < 1 or length > max_bytes:
             raise UIError("Invalid request size.")
         try:
             value = json.loads(self.rfile.read(length))
@@ -505,6 +669,23 @@ class Handler(BaseHTTPRequestHandler):
                 if not path.is_file():
                     raise UIError("The review report is not ready yet.")
                 self._json(json.loads(path.read_text(encoding="utf-8")))
+                return
+            match = re.fullmatch(r"/api/jobs/([a-f0-9]{12})/source-text", parsed.path)
+            if match:
+                job = MANAGER.get(match.group(1))
+                text_output = next(
+                    (
+                        item for item in (job.get("outputs") or [])
+                        if isinstance(item, dict) and item.get("label") == "High-accuracy text"
+                    ),
+                    None,
+                )
+                if not isinstance(text_output, dict):
+                    raise UIError("The OCR text is not ready yet.")
+                path = OUTPUT_ROOT / match.group(1) / Path(str(text_output["name"])).name
+                if not path.is_file():
+                    raise UIError("The OCR text file is missing.")
+                self._json({"text": path.read_text(encoding="utf-8")})
                 return
             match = re.fullmatch(r"/api/jobs/([a-f0-9]{12})/page/(\d+)", parsed.path)
             if match:
@@ -556,6 +737,15 @@ class Handler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/api/jobs/([a-f0-9]{12})/retry", parsed.path)
             if match:
                 self._json(MANAGER.retry(match.group(1)))
+                return
+            match = re.fullmatch(r"/api/jobs/([a-f0-9]{12})/cancel", parsed.path)
+            if match:
+                self._json(MANAGER.cancel(match.group(1)))
+                return
+            match = re.fullmatch(r"/api/jobs/([a-f0-9]{12})/reviewed-text", parsed.path)
+            if match:
+                payload = self._read_json(max_bytes=21 * 1024 * 1024)
+                self._json(MANAGER.save_reviewed_text(match.group(1), payload.get("text")))
                 return
             self.send_error(404)
         except (UIError, OSError, subprocess.SubprocessError) as exc:

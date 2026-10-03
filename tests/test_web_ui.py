@@ -52,6 +52,24 @@ class ConfidenceReportTests(unittest.TestCase):
         self.assertEqual(report['summary'], {'pages': 1, 'yellow': 1, 'red': 1})
         self.assertTrue(report['pages'][0]['rows'][0]['speaker_like'])
 
+    def test_page_number_header_is_not_counted_as_uncertain(self) -> None:
+        xml = """<?xml version='1.0' encoding='UTF-8'?>
+        <alto xmlns='http://www.loc.gov/standards/alto/ns-v4#'>
+          <Layout><Page WIDTH='1000' HEIGHT='1600'><PrintSpace><TextBlock>
+            <TextLine HPOS='450' VPOS='80' WIDTH='100' HEIGHT='30'>
+              <String CONTENT='-١٧٢-' WC='0.20'/>
+            </TextLine>
+            <TextLine HPOS='200' VPOS='500' WIDTH='500' HEIGHT='30'>
+              <String CONTENT='كلمة' WC='0.70'/>
+            </TextLine>
+          </TextBlock></PrintSpace></Page></Layout>
+        </alto>"""
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / 'page-0001.alto.xml').write_text(xml, encoding='utf-8')
+            report = create_review_report(directory, directory / 'review.json')
+        self.assertEqual(report['summary'], {'pages': 1, 'yellow': 1, 'red': 0})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,9 +32,11 @@ remain saved.
    - `1-10,15,20-25` to combine ranges and individual pages.
 4. Change **Output name** if desired. Do not add a folder path.
 5. Optionally enable **Also create a searchable PDF**.
-6. Optionally click **Enable finish notification** and allow browser
+6. Choose a **CPU load**. Balanced is recommended; Gentle keeps the laptop
+   more responsive, while Faster uses more CPU and memory.
+7. Optionally click **Enable finish notification** and allow browser
    notifications.
-7. Click **Start OCR** and leave the terminal open until processing finishes.
+8. Click **Start OCR** and leave the terminal open until processing finishes.
 
 Start with a small representative range, such as 3–5 pages, before processing
 a complete book. High-accuracy OCR is CPU-intensive and may take several
@@ -75,6 +77,18 @@ be incorrect, especially with old fonts, damaged scans, punctuation, names,
 page numbers, and similar Arabic letter shapes. Proofread important text
 against the page image even when there are no red labels.
 
+Use **Previous/Next uncertain page** to move through pages needing attention,
+**Show all pages** when a complete review is required, and the zoom controls to
+inspect small print. Page-number headers are excluded from warning counts to
+reduce noise.
+
+## Correct and save reviewed text
+
+After OCR completes, the **Correct and save text** area contains the complete
+TXT output. Make corrections there and click **Save reviewed text**. The app
+creates a separate `- reviewed.txt` download; it never overwrites the raw OCR
+TXT.
+
 ## Resume or retry
 
 If a job fails, open it under **Recent jobs** and select **Retry / resume**.
@@ -83,6 +97,10 @@ stage does not normally start from the beginning.
 
 After the computer or interface is restarted, previously interrupted jobs are
 shown as needing attention and can be resumed from the same screen.
+
+To stop a running job, click **Cancel safely**. The app stops all of that job's
+OCR workers, marks it as cancelled, and keeps completed page results. Use
+**Retry / resume** later to continue it.
 
 ## Process a large collection
 

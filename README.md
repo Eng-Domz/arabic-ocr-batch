@@ -41,6 +41,10 @@ JSON, and an optional searchable PDF. Outputs are saved below `output/ui/`;
 uploaded working copies and rendered pages remain ignored by Git. The original
 PDF selected in the browser is never changed.
 
+Version 0.2 adds safe cancellation/resume, configurable CPU load, live ETA,
+uncertain-page navigation, scan zoom, quieter page-number confidence warnings,
+and an editor that saves corrections as a separate reviewed TXT file.
+
 The interface expects the model layout used by the documented Kraken setup:
 
 ```text
