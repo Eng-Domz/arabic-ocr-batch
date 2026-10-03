@@ -6,6 +6,7 @@ The restart-safe searchable-PDF pipeline uses only the Python 3.11+ standard lib
 
 Additional documentation:
 
+- [How to use the local interface and batch pipeline](HOW_TO_USE.md)
 - [Architecture and safety invariants](docs/ARCHITECTURE.md)
 - [High-accuracy Kraken workflow](docs/KRAKEN.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
