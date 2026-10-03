@@ -36,16 +36,23 @@ def discover_pdfs(
         input_dir, followlinks=False, onerror=handle_walk_error
     ):
         root_path = Path(root)
-        dirnames[:] = sorted(
-            (name for name in dirnames if not (root_path / name).is_symlink()),
-            key=str.casefold,
-        )
+        safe_directories: list[str] = []
+        for name in dirnames:
+            directory = root_path / name
+            try:
+                if not directory.is_symlink():
+                    safe_directories.append(name)
+            except OSError as exc:
+                handle_walk_error(exc)
+        dirnames[:] = sorted(safe_directories, key=str.casefold)
         for filename in sorted(filenames, key=str.casefold):
             path = root_path / filename
-            if path.suffix.casefold() != ".pdf" or path.is_symlink():
+            if path.suffix.casefold() != ".pdf":
                 continue
             relative = path.relative_to(input_dir)
             try:
+                if path.is_symlink():
+                    continue
                 stat = path.stat()
                 found.append(PdfSource(path, relative, stat.st_size, stat.st_mtime_ns))
             except OSError as exc:
