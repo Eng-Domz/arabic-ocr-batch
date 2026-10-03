@@ -1,0 +1,40 @@
+[paths]
+input_dir = "input"
+searchable_dir = "output/searchable"
+text_dir = "output/text"
+work_dir = "work"
+logs_dir = "logs"
+state_db = "state/ocr-state.sqlite3"
+failures_csv = "reports/failures.csv"
+
+[ocr]
+languages = "ara+eng"
+output_type = "pdfa"
+rotate_pages = true
+deskew = true
+skip_text = true
+optimize = 1
+ocr_jobs = 2
+document_workers = 1
+max_attempts = 2
+timeout_seconds = 0
+extra_args = []
+
+[text_quality]
+# Retry suspicious text layers once with --redo-ocr. The retry deliberately
+# omits --deskew because OCRmyPDF does not allow it together with --redo-ocr.
+automatic_redo = true
+minimum_alphanumeric_chars_per_page = 10
+
+[runtime]
+minimum_free_gb = 5
+
+[tools]
+ocrmypdf = "ocrmypdf"
+qpdf = "qpdf"
+pdftotext = "pdftotext"
+# Doctor-only probes: OCRmyPDF itself resolves these tools from PATH.
+tesseract = "tesseract"
+ghostscript = "gs"
+pdfinfo = "pdfinfo"
+
