@@ -31,16 +31,22 @@ remain saved.
    - `1-10` to process one continuous range;
    - `1-10,15,20-25` to combine ranges and individual pages.
 4. Change **Output name** if desired. Do not add a folder path.
-5. Optionally enable **Also create a searchable PDF**.
-6. Choose a **CPU load**. Balanced is recommended; Gentle keeps the laptop
+5. Choose a quality mode:
+   - **Fast** uses PP-OCRv6 only and is intended for drafts.
+   - **Smart** runs PP-OCRv6 on every page and sends risky pages to Surya.
+   - **Best Quality** uses Surya for every page and PP-OCRv6 as a second
+     opinion. This is the recommended mode for final text.
+6. Optionally enable **Also create a searchable PDF**.
+7. Choose a **CPU load**. Balanced is recommended; Gentle keeps the laptop
    more responsive, while Faster uses more CPU and memory.
-7. Optionally click **Enable finish notification** and allow browser
+8. Optionally click **Enable finish notification** and allow browser
    notifications.
-8. Click **Start OCR** and leave the terminal open until processing finishes.
+9. Click **Start OCR** and leave the terminal open until processing finishes.
 
 Start with a small representative range, such as 3–5 pages, before processing
-a complete book. High-accuracy OCR is CPU-intensive and may take several
-minutes per group of pages.
+a complete book. On the prepared laptop, Best Quality measured approximately
+13 minutes for five pages, or about 4 hours 20 minutes for 100 pages before
+manual review and retries. The interface shows an estimate before the run.
 
 ## Understand the outputs
 
@@ -52,10 +58,10 @@ output/ui/<job-id>/
 
 The interface provides download buttons for:
 
-- **High-accuracy text**: UTF-8 TXT produced from the PP-OCRv6 Arabic OCR
-  result.
-- **Confidence report**: JSON containing each recognized token and its model
-  confidence.
+- **High-accuracy text**: UTF-8 TXT from the selected mode. Surya is the
+  primary source for pages processed in Best Quality or Smart mode.
+- **Uncertainty report**: JSON containing the displayed text, model
+  disagreement labels, confidence signals, and the PP-OCR second opinion.
 - **Searchable PDF**: optional PDF/A output whose pages can be searched and
   copied. Its hidden text layer is produced by OCRmyPDF/Tesseract and may not
   exactly match the high-accuracy TXT.
@@ -68,14 +74,18 @@ are excluded from Git. The original PDF remains in its original location.
 When OCR finishes, the interface shows the scanned page beside the recognized
 Arabic text.
 
-- **Yellow — Check**: model confidence is below 80%.
-- **Red — Urgent review**: model confidence is below 60%.
-- **No label**: the model reported at least 80% confidence.
+- **Yellow — Models disagree**: Surya and PP-OCR produced different text.
+- **Red — Strong mismatch**: one model omitted text or the disagreement is
+  too large to resolve automatically.
+- **No label**: both recognizers agreed after harmless Arabic spelling-form
+  normalization, or only PP-OCR was run and its existing confidence gate did
+  not flag the token.
 
-Confidence is only a review-priority signal. A high-confidence word can still
-be incorrect, especially with old fonts, damaged scans, punctuation, names,
-page numbers, and similar Arabic letter shapes. Proofread important text
-against the page image even when there are no red labels.
+Confidence is only one review-priority signal. It is never treated as proof:
+our test data included incorrect PP-OCR words above 90% confidence. Expand
+**Compare the complete PP-OCR second opinion** below a Surya page when a
+highlight needs context. Proofread important names, numbers, and punctuation
+against the scan even when both models agree.
 
 Use **Previous/Next uncertain page** to move through pages needing attention,
 **Show all pages** when a complete review is required, and the zoom controls to
@@ -92,8 +102,8 @@ TXT.
 ## Resume or retry
 
 If a job fails, open it under **Recent jobs** and select **Retry / resume**.
-Already completed OCR page files are reused, so the high-accuracy recognition
-stage does not normally start from the beginning.
+Already completed PP-OCR page files are reused. Surya work is saved in batches
+of up to eight pages, so a completed batch is also reused after a retry.
 
 After the computer or interface is restarted, previously interrupted jobs are
 shown as needing attention and can be resumed from the same screen.
@@ -145,6 +155,21 @@ The expected files on the prepared laptop are:
 
 See [docs/KRAKEN.md](docs/KRAKEN.md) for the advanced setup and override
 environment variables.
+
+### Smart and Best Quality are unavailable
+
+Install the optional Surya engine once from Ubuntu:
+
+```bash
+cd /mnt/c/Users/Ram/Desktop/arabic-ocr-batch
+bash scripts/install_surya_wsl.sh
+```
+
+The official Python package is large because its PyTorch dependency includes
+GPU libraries even when this laptop uses the CPU backend. Restart the
+interface after installation. The first Surya job also downloads the model
+weights; later jobs reuse them. Override the detected executables with
+`ARABIC_OCR_SURYA` and `ARABIC_OCR_LLAMA_SERVER` if installed elsewhere.
 
 ### OCR appears frozen
 

@@ -49,7 +49,10 @@ class ConfidenceReportTests(unittest.TestCase):
             directory = Path(temp)
             (directory / 'page-0001.alto.xml').write_text(xml, encoding='utf-8')
             report = create_review_report(directory, directory / 'review.json')
-        self.assertEqual(report['summary'], {'pages': 1, 'yellow': 1, 'red': 1})
+        self.assertEqual(
+            report['summary'],
+            {'pages': 1, 'yellow': 1, 'red': 1, 'below_96': 3, 'suspicious': 0},
+        )
         self.assertTrue(report['pages'][0]['rows'][0]['speaker_like'])
 
     def test_page_number_header_is_not_counted_as_uncertain(self) -> None:
@@ -68,7 +71,10 @@ class ConfidenceReportTests(unittest.TestCase):
             directory = Path(temp)
             (directory / 'page-0001.alto.xml').write_text(xml, encoding='utf-8')
             report = create_review_report(directory, directory / 'review.json')
-        self.assertEqual(report['summary'], {'pages': 1, 'yellow': 1, 'red': 0})
+        self.assertEqual(
+            report['summary'],
+            {'pages': 1, 'yellow': 1, 'red': 0, 'below_96': 1, 'suspicious': 0},
+        )
 
 
 if __name__ == "__main__":

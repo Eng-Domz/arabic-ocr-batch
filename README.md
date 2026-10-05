@@ -19,11 +19,11 @@ the code is not automatically granted redistribution or modification rights.
 
 ## Local browser interface
 
-The project includes a private local interface for the high-accuracy workflow.
-It accepts a PDF copy, validates page ranges, runs PP-OCRv6, saves UTF-8 text,
-and shows a page-by-page review screen. Words below 80% model confidence are
-yellow; words below 60% are red. Confidence is a review aid, not a guarantee:
-an unmarked word can still be wrong.
+The project includes a private local interface with three quality modes. Fast
+uses PP-OCRv6, Smart routes risky pages to Surya 2, and Best Quality uses Surya
+for every page while PP-OCRv6 supplies an independent second opinion. The
+page-by-page review highlights model disagreements instead of trusting a raw
+confidence percentage as proof of correctness.
 
 From WSL Ubuntu in the project folder:
 
@@ -41,9 +41,9 @@ JSON, and an optional searchable PDF. Outputs are saved below `output/ui/`;
 uploaded working copies and rendered pages remain ignored by Git. The original
 PDF selected in the browser is never changed.
 
-Version 0.2 adds safe cancellation/resume, configurable CPU load, live ETA,
-uncertain-page navigation, scan zoom, quieter page-number confidence warnings,
-and an editor that saves corrections as a separate reviewed TXT file.
+Version 0.3 adds Surya/llama.cpp integration, Fast/Smart/Best Quality modes,
+restartable eight-page Surya batches, pre-run time estimates, and a smarter
+review showing the PP-OCR comparison behind every Surya page.
 
 The interface expects the model layout used by the documented Kraken setup:
 
@@ -54,6 +54,15 @@ The interface expects the model layout used by the documented Kraken setup:
 
 Override these with `ARABIC_OCR_LAYOUT_MODEL`,
 `ARABIC_OCR_RECOGNITION_MODEL`, or `ARABIC_OCR_KRAKEN` when needed.
+
+Install the optional Surya engine in WSL with:
+
+```bash
+bash scripts/install_surya_wsl.sh
+```
+
+The tested local defaults are Surya OCR 0.22.1 and llama.cpp b11417. Override
+their paths with `ARABIC_OCR_SURYA` and `ARABIC_OCR_LLAMA_SERVER`.
 
 ## Supported local setup
 

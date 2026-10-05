@@ -21,6 +21,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from .hybrid import (
+    create_hybrid_report,
+    load_surya_results,
+    remap_surya_pages,
+    select_smart_pages,
+    write_hybrid_text,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 UI_HTML = Path(__file__).with_name("ui.html")
@@ -34,10 +42,16 @@ DEFAULT_KRAKEN = (
 )
 DEFAULT_LAYOUT = Path.home() / ".local/share/arabic-ocr-batch/models/AOCP_print_models/layout/layout-20210711_AQ.mlmodel"
 DEFAULT_RECOGNITION = Path.home() / ".local/share/arabic-ocr-batch/models/ppocrv6/medium.safetensors"
+DEFAULT_SURYA = Path.home() / ".local/share/arabic-ocr-batch/experiments/surya2/.venv/bin/surya_ocr"
+DEFAULT_LLAMA_SERVER = Path.home() / ".local/share/arabic-ocr-batch/experiments/surya2/llama/llama-server"
 
 MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024
 YELLOW_THRESHOLD = 0.80
 RED_THRESHOLD = 0.60
+SMART_CONFIDENCE_THRESHOLD = 0.96
+SURYA_SECONDS_PER_PAGE = 155
+SURYA_MINIMUM_BATCH_SECONDS = 600
+OCR_MODES = {"fast", "smart", "best"}
 
 
 class UIError(ValueError):
@@ -109,6 +123,20 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def _suspicious_token(value: str) -> bool:
+    """Detect script noise without rejecting ordinary Arabic/Latin punctuation."""
+    for character in value:
+        if character.isspace() or character.isdigit() or character in "_-–—/\\.,:;؛،!?؟()[]{}'\"…+%":
+            continue
+        codepoint = ord(character)
+        if character.isascii() and character.isalpha():
+            continue
+        if 0x0600 <= codepoint <= 0x06FF or 0x0750 <= codepoint <= 0x077F:
+            continue
+        return True
+    return "�" in value
+
+
 @dataclass(frozen=True)
 class ReviewLine:
     x: int
@@ -129,7 +157,7 @@ def _review_page(path: Path, page_number: int) -> dict[str, object]:
     page_height = int(page_element.attrib.get("HEIGHT", "0")) if page_element is not None else 0
     lines: list[ReviewLine] = []
     all_confidences: list[float] = []
-    yellow = red = 0
+    yellow = red = below_96 = suspicious = 0
     for element in root.iter():
         if _local_name(element.tag) != "TextLine":
             continue
@@ -158,6 +186,10 @@ def _review_page(path: Path, page_number: int) -> dict[str, object]:
         for token in tokens:
             confidence = float(token["confidence"])
             reviewable = not page_number_line and any(character.isalnum() for character in str(token["text"]))
+            if reviewable and confidence < SMART_CONFIDENCE_THRESHOLD:
+                below_96 += 1
+            if reviewable and _suspicious_token(str(token["text"])):
+                suspicious += 1
             if reviewable and confidence < RED_THRESHOLD:
                 token["level"] = "red"
                 red += 1
@@ -210,6 +242,8 @@ def _review_page(path: Path, page_number: int) -> dict[str, object]:
         else None,
         "yellow": yellow,
         "red": red,
+        "below_96": below_96,
+        "suspicious": suspicious,
         "rows": output_rows,
     }
 
@@ -227,6 +261,8 @@ def create_review_report(alto_dir: Path, destination: Path) -> dict[str, object]
             "pages": len(pages),
             "yellow": sum(int(page["yellow"]) for page in pages),
             "red": sum(int(page["red"]) for page in pages),
+            "below_96": sum(int(page["below_96"]) for page in pages),
+            "suspicious": sum(int(page["suspicious"]) for page in pages),
         },
         "pages": pages,
     }
@@ -253,6 +289,8 @@ class JobManager:
                 job = json.loads(state_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
+            job.setdefault("mode", "fast")
+            job.setdefault("surya_pages", [])
             if job.get("status") in {"running", "cancelling"}:
                 job["status"] = "failed"
                 job["message"] = "The interface stopped during this job. Press Retry to resume it."
@@ -263,8 +301,23 @@ class JobManager:
         allowed = (
             "id", "name", "status", "stage", "message", "progress", "completed_pages",
             "total_pages", "pages", "outputs", "review", "created_at", "eta_seconds", "workers",
+            "mode", "surya_pages",
         )
         return {key: job.get(key) for key in allowed}
+
+    @staticmethod
+    def capabilities() -> dict[str, object]:
+        surya = Path(os.environ.get("ARABIC_OCR_SURYA", str(DEFAULT_SURYA))).expanduser()
+        llama = Path(os.environ.get("ARABIC_OCR_LLAMA_SERVER", str(DEFAULT_LLAMA_SERVER))).expanduser()
+        return {
+            "surya": surya.is_file() and os.access(surya, os.X_OK),
+            "llama_server": llama.is_file() and os.access(llama, os.X_OK),
+            "best_quality_ready": all(
+                path.is_file() and os.access(path, os.X_OK) for path in (surya, llama)
+            ),
+            "estimated_surya_seconds_per_page": SURYA_SECONDS_PER_PAGE,
+            "estimated_surya_minimum_batch_seconds": SURYA_MINIMUM_BATCH_SECONDS,
+        }
 
     def _save(self, job: dict[str, object]) -> None:
         target = STATE_ROOT / f"{job['id']}.json"
@@ -292,6 +345,9 @@ class JobManager:
     def create(self, source: Path, page_count: int, payload: dict[str, object]) -> dict[str, object]:
         pages = parse_page_selection(str(payload.get("pages", "all")), page_count)
         output_name = safe_output_name(str(payload.get("output_name") or source.stem))
+        mode = str(payload.get("mode", "smart")).casefold()
+        if mode not in OCR_MODES:
+            raise UIError("OCR mode must be Fast, Smart, or Best Quality.")
         try:
             workers = int(payload.get("workers", 2))
         except (TypeError, ValueError) as exc:
@@ -310,6 +366,8 @@ class JobManager:
             "completed_pages": 0,
             "total_pages": len(pages),
             "pages": pages,
+            "mode": mode,
+            "surya_pages": [],
             "create_searchable_pdf": bool(payload.get("create_searchable_pdf", False)),
             "workers": workers,
             "eta_seconds": None,
@@ -472,6 +530,137 @@ class JobManager:
                 message=f"Rendered page {index} of {len(pages)}",
             )
 
+    @staticmethod
+    def _surya_page_spec(pages: list[int]) -> str:
+        zero_based = [page - 1 for page in sorted(set(pages))]
+        parts: list[str] = []
+        for start, end in contiguous_ranges(zero_based):
+            parts.append(str(start) if start == end else f"{start}-{end}")
+        return ",".join(parts)
+
+    def _run_surya(
+        self,
+        job: dict[str, object],
+        pages: list[int],
+        destination: Path,
+        log_path: Path,
+    ) -> dict[int, dict[str, object]]:
+        if not pages:
+            return {}
+        surya = Path(os.environ.get("ARABIC_OCR_SURYA", str(DEFAULT_SURYA))).expanduser()
+        llama = Path(os.environ.get("ARABIC_OCR_LLAMA_SERVER", str(DEFAULT_LLAMA_SERVER))).expanduser()
+        for required, label in ((surya, "Surya"), (llama, "llama.cpp server")):
+            if not required.is_file() or not os.access(required, os.X_OK):
+                raise RuntimeError(
+                    f"{label} is not installed at {required}. Run the documented Surya setup first."
+                )
+
+        source = Path(str(job["source"]))
+        chunks = [pages[index : index + 8] for index in range(0, len(pages), 8)]
+        chunk_estimates = [
+            max(SURYA_MINIMUM_BATCH_SECONDS, len(chunk) * SURYA_SECONDS_PER_PAGE)
+            for chunk in chunks
+        ]
+        result_pages: dict[int, dict[str, object]] = {}
+        completed: list[int] = []
+        destination.mkdir(parents=True, exist_ok=True)
+        for chunk_index, chunk in enumerate(chunks, start=1):
+            self._raise_if_cancelled(job)
+            chunk_dir = destination / f"chunk-{chunk_index:04d}"
+            expected = chunk_dir / source.stem / "results.json"
+            if expected.is_file() and expected.stat().st_size:
+                try:
+                    cached_pages = load_surya_results(expected)
+                except (OSError, ValueError, json.JSONDecodeError):
+                    expected.unlink(missing_ok=True)
+                else:
+                    try:
+                        remapped = remap_surya_pages(cached_pages, chunk)
+                    except ValueError:
+                        expected.unlink(missing_ok=True)
+                    else:
+                        result_pages.update(remapped)
+                        completed.extend(chunk)
+                        continue
+            chunk_dir.mkdir(parents=True, exist_ok=True)
+            environment = os.environ.copy()
+            environment.update(
+                SURYA_INFERENCE_BACKEND="llamacpp",
+                LLAMA_CPP_BINARY=str(llama),
+            )
+            command = [
+                str(surya),
+                str(source),
+                "--page_range",
+                self._surya_page_spec(chunk),
+                "--output_dir",
+                str(chunk_dir),
+            ]
+            started = time.monotonic()
+            with log_path.open("a", encoding="utf-8") as log:
+                log.write(f"\n[Surya chunk {chunk_index}/{len(chunks)}: pages {chunk}]\n")
+                log.flush()
+                process = subprocess.Popen(
+                    command,
+                    cwd=PROJECT_ROOT,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    errors="replace",
+                    start_new_session=True,
+                    env=environment,
+                )
+                self._register_process(job, process)
+                try:
+                    while process.poll() is None:
+                        if self._cancel_event(job).wait(1):
+                            self._terminate_process(process)
+                            raise JobCancelled("OCR cancelled by the user.")
+                        elapsed = time.monotonic() - started
+                        timeout_seconds = max(
+                            1800, round(chunk_estimates[chunk_index - 1] * 2.5)
+                        )
+                        if elapsed > timeout_seconds:
+                            self._terminate_process(process)
+                            raise RuntimeError(
+                                f"Surya exceeded the {timeout_seconds // 60}-minute safety limit "
+                                f"for pages {chunk[0]}–{chunk[-1]}. Completed batches are safe to retry."
+                            )
+                        remaining = max(
+                            0,
+                            round(
+                                sum(chunk_estimates[chunk_index - 1 :]) - elapsed
+                            ),
+                        )
+                        self._update(
+                            job,
+                            stage="Surya quality pass",
+                            message=(
+                                f"Surya is reading pages {chunk[0]}–{chunk[-1]} "
+                                f"(batch {chunk_index} of {len(chunks)})"
+                            ),
+                            progress=86 + round((chunk_index - 1) / max(1, len(chunks)) * 10),
+                            eta_seconds=remaining,
+                            surya_pages=completed,
+                        )
+                    return_code = process.wait()
+                finally:
+                    self._clear_process(job, process)
+            if return_code:
+                raise RuntimeError(
+                    f"Surya failed with exit code {return_code}. See {log_path}."
+                )
+            if not expected.is_file():
+                candidates = list(chunk_dir.rglob("results.json"))
+                if len(candidates) != 1:
+                    raise RuntimeError(f"Surya did not create a readable result for pages {chunk}.")
+                expected = candidates[0]
+            result_pages.update(remap_surya_pages(load_surya_results(expected), chunk))
+            completed.extend(chunk)
+            self._update(job, surya_pages=completed, eta_seconds=0)
+        self._update(job, surya_pages=completed, eta_seconds=0)
+        return result_pages
+
     def _run(self, job: dict[str, object]) -> None:
         job_id = str(job["id"])
         work_dir = JOB_ROOT / job_id
@@ -541,19 +730,55 @@ class JobManager:
             if return_code:
                 raise RuntimeError(f"Kraken OCR failed with exit code {return_code}. See {log_path}.")
 
+            mode = str(job.get("mode", "fast"))
             text_path = output_dir / f"{job['name']}.txt"
             converter = PROJECT_ROOT / "scripts" / "kraken_alto_to_text.py"
             alto_files = [str(path) for path in sorted(alto_dir.glob("*.alto.xml"))]
+            pp_text_path = text_path if mode == "fast" else work_dir / "pp-ocr.txt"
             self._command(
                 job,
-                [sys.executable, str(converter), *alto_files, "--output", str(text_path)],
-                "Building UTF-8 text",
+                [sys.executable, str(converter), *alto_files, "--output", str(pp_text_path)],
+                "Building PP-OCR text",
             )
             report_path = output_dir / "review.json"
-            report = create_review_report(alto_dir, report_path)
+            pp_report_path = report_path if mode == "fast" else work_dir / "pp-review.json"
+            pp_report = create_review_report(alto_dir, pp_report_path)
+            if mode == "fast":
+                report = pp_report
+                engine_label = "Fast PP-OCR text"
+            else:
+                selected_pages = [int(page) for page in job["pages"]]  # type: ignore[index]
+                surya_pages = (
+                    selected_pages
+                    if mode == "best"
+                    else [page for page in select_smart_pages(pp_report) if page in selected_pages]
+                )
+                self._update(
+                    job,
+                    stage="Planning quality pass",
+                    message=(
+                        f"Sending {len(surya_pages)} of {len(selected_pages)} pages to Surya"
+                        if surya_pages
+                        else "PP-OCR found no risky pages; Surya is not needed"
+                    ),
+                    progress=86,
+                    surya_pages=[],
+                )
+                surya_results = self._run_surya(
+                    job, surya_pages, work_dir / "surya", log_path
+                )
+                report = create_hybrid_report(
+                    pp_report, surya_results, report_path, mode=mode
+                )
+                write_hybrid_text(report, text_path)
+                engine_label = (
+                    "Best-quality Surya text"
+                    if mode == "best"
+                    else "Smart hybrid text"
+                )
             outputs = [
-                {"label": "High-accuracy text", "name": text_path.name},
-                {"label": "Confidence report", "name": report_path.name},
+                {"label": "High-accuracy text", "name": text_path.name, "detail": engine_label},
+                {"label": "Uncertainty report", "name": report_path.name},
             ]
 
             if bool(job.get("create_searchable_pdf")):
@@ -579,7 +804,10 @@ class JobManager:
             review = report["summary"]
             message = "Finished"
             if int(review["yellow"]) or int(review["red"]):  # type: ignore[index]
-                message = f"Finished — {review['yellow']} check and {review['red']} urgent review labels"
+                message = (
+                    f"Finished — {review['yellow']} model disagreements to check "
+                    f"and {review['red']} urgent review labels"
+                )
             self._update(
                 job,
                 status="complete",
@@ -616,7 +844,7 @@ MANAGER = JobManager()
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ArabicOCRLocal/0.2"
+    server_version = "ArabicOCRLocal/0.3"
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -656,8 +884,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if parsed.path == "/favicon.ico":
+                self.send_response(HTTPStatus.NO_CONTENT)
+                self.end_headers()
+                return
             if parsed.path == "/api/jobs":
                 self._json({"jobs": MANAGER.list_jobs()})
+                return
+            if parsed.path == "/api/capabilities":
+                self._json(MANAGER.capabilities())
                 return
             match = re.fullmatch(r"/api/jobs/([a-f0-9]{12})", parsed.path)
             if match:

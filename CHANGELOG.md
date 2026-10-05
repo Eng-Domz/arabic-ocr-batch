@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-10-05
+
+- Added Fast, Smart, and Best Quality modes to the local interface.
+- Added optional Surya 2 full-page OCR through the local llama.cpp backend,
+  processed in restartable batches of up to eight pages.
+- Made Surya the primary text source in Best Quality mode while retaining
+  PP-OCRv6 as an independent second opinion.
+- Added conservative Smart routing based on PP-OCR confidence, script noise,
+  page text density, and page-level confidence.
+- Replaced raw-confidence-only review with model-disagreement highlighting,
+  complete PP-OCR comparison text, engine labels, and measured time estimates.
+- Added automated hybrid parsing, routing, alignment, and output tests.
+
 ## 0.2.0 - 2026-10-03
 
 - Added safe in-app cancellation that stops the complete OCR process group while
