@@ -61,8 +61,12 @@ Install the optional Surya engine in WSL with:
 bash scripts/install_surya_wsl.sh
 ```
 
-The tested local defaults are Surya OCR 0.22.1 and llama.cpp b11417. Override
-their paths with `ARABIC_OCR_SURYA` and `ARABIC_OCR_LLAMA_SERVER`.
+The tested local defaults are Surya OCR 0.22.1 and llama.cpp b11417. The
+installer always provides a CPU backend. On x86-64 WSL systems where
+`nvidia-smi` can see an NVIDIA GPU, it also installs the CUDA 12.8 backend.
+The interface checks that CUDA can enumerate a device before using it and
+otherwise falls back to CPU automatically. Override the detected executables
+with `ARABIC_OCR_SURYA` and `ARABIC_OCR_LLAMA_SERVER` when needed.
 
 ## Supported local setup
 

@@ -15,6 +15,7 @@ import unicodedata
 import uuid
 import webbrowser
 import xml.etree.ElementTree as ET
+from collections.abc import Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,7 +44,7 @@ DEFAULT_KRAKEN = (
 DEFAULT_LAYOUT = Path.home() / ".local/share/arabic-ocr-batch/models/AOCP_print_models/layout/layout-20210711_AQ.mlmodel"
 DEFAULT_RECOGNITION = Path.home() / ".local/share/arabic-ocr-batch/models/ppocrv6/medium.safetensors"
 DEFAULT_SURYA = Path.home() / ".local/share/arabic-ocr-batch/experiments/surya2/.venv/bin/surya_ocr"
-DEFAULT_LLAMA_SERVER = Path.home() / ".local/share/arabic-ocr-batch/experiments/surya2/llama/llama-server"
+DEFAULT_SURYA_ENGINE_ROOT = Path.home() / ".local/share/arabic-ocr-batch/experiments/surya2"
 
 MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024
 YELLOW_THRESHOLD = 0.80
@@ -60,6 +61,41 @@ class UIError(ValueError):
 
 class JobCancelled(RuntimeError):
     pass
+
+
+def _is_executable(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def _cuda_server_is_usable(path: Path) -> bool:
+    try:
+        result = subprocess.run(
+            [str(path), "--list-devices"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    output = f"{result.stdout}\n{result.stderr}".casefold()
+    return result.returncode == 0 and "cuda" in output
+
+
+def choose_llama_server(
+    *,
+    engine_root: Path = DEFAULT_SURYA_ENGINE_ROOT,
+    environment: Mapping[str, str] = os.environ,
+    cuda_probe=_cuda_server_is_usable,
+) -> tuple[Path, str]:
+    override = environment.get("ARABIC_OCR_LLAMA_SERVER")
+    if override:
+        return Path(override).expanduser(), "custom"
+
+    cuda = engine_root / "llama-cuda/llama-server"
+    if _is_executable(cuda) and cuda_probe(cuda):
+        return cuda, "cuda"
+    return engine_root / "llama/llama-server", "cpu"
 
 
 def safe_output_name(value: str) -> str:
@@ -308,13 +344,12 @@ class JobManager:
     @staticmethod
     def capabilities() -> dict[str, object]:
         surya = Path(os.environ.get("ARABIC_OCR_SURYA", str(DEFAULT_SURYA))).expanduser()
-        llama = Path(os.environ.get("ARABIC_OCR_LLAMA_SERVER", str(DEFAULT_LLAMA_SERVER))).expanduser()
+        llama, llama_backend = choose_llama_server()
         return {
-            "surya": surya.is_file() and os.access(surya, os.X_OK),
-            "llama_server": llama.is_file() and os.access(llama, os.X_OK),
-            "best_quality_ready": all(
-                path.is_file() and os.access(path, os.X_OK) for path in (surya, llama)
-            ),
+            "surya": _is_executable(surya),
+            "llama_server": _is_executable(llama),
+            "llama_backend": llama_backend,
+            "best_quality_ready": all(_is_executable(path) for path in (surya, llama)),
             "estimated_surya_seconds_per_page": SURYA_SECONDS_PER_PAGE,
             "estimated_surya_minimum_batch_seconds": SURYA_MINIMUM_BATCH_SECONDS,
         }
@@ -548,7 +583,7 @@ class JobManager:
         if not pages:
             return {}
         surya = Path(os.environ.get("ARABIC_OCR_SURYA", str(DEFAULT_SURYA))).expanduser()
-        llama = Path(os.environ.get("ARABIC_OCR_LLAMA_SERVER", str(DEFAULT_LLAMA_SERVER))).expanduser()
+        llama, _ = choose_llama_server()
         for required, label in ((surya, "Surya"), (llama, "llama.cpp server")):
             if not required.is_file() or not os.access(required, os.X_OK):
                 raise RuntimeError(
