@@ -5,11 +5,67 @@ import unittest
 from pathlib import Path
 
 from arabic_ocr_batch.web_ui import (
+    choose_llama_server,
     contiguous_ranges,
     create_review_report,
     parse_page_selection,
     safe_output_name,
 )
+
+
+def make_executable(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+class LlamaBackendSelectionTests(unittest.TestCase):
+    def test_explicit_server_override_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            override = make_executable(root / "custom" / "llama-server")
+            make_executable(root / "llama" / "llama-server")
+            make_executable(root / "llama-cuda" / "llama-server")
+
+            selected, backend = choose_llama_server(
+                engine_root=root,
+                environment={"ARABIC_OCR_LLAMA_SERVER": str(override)},
+                cuda_probe=lambda _: True,
+            )
+
+        self.assertEqual(selected, override)
+        self.assertEqual(backend, "custom")
+
+    def test_usable_cuda_server_is_preferred(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            make_executable(root / "llama" / "llama-server")
+            cuda = make_executable(root / "llama-cuda" / "llama-server")
+
+            selected, backend = choose_llama_server(
+                engine_root=root,
+                environment={},
+                cuda_probe=lambda path: path == cuda,
+            )
+
+        self.assertEqual(selected, cuda)
+        self.assertEqual(backend, "cuda")
+
+    def test_failed_cuda_probe_falls_back_to_cpu(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cpu = make_executable(root / "llama" / "llama-server")
+            make_executable(root / "llama-cuda" / "llama-server")
+
+            selected, backend = choose_llama_server(
+                engine_root=root,
+                environment={},
+                cuda_probe=lambda _: False,
+            )
+
+        self.assertEqual(selected, cpu)
+        self.assertEqual(backend, "cpu")
 
 
 class PageSelectionTests(unittest.TestCase):

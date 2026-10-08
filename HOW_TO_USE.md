@@ -161,15 +161,18 @@ environment variables.
 Install the optional Surya engine once from Ubuntu:
 
 ```bash
-cd /mnt/c/Users/Ram/Desktop/arabic-ocr-batch
+cd /mnt/c/path/to/arabic-ocr-batch
 bash scripts/install_surya_wsl.sh
 ```
 
 The official Python package is large because its PyTorch dependency includes
-GPU libraries even when this laptop uses the CPU backend. Restart the
-interface after installation. The first Surya job also downloads the model
-weights; later jobs reuse them. Override the detected executables with
-`ARABIC_OCR_SURYA` and `ARABIC_OCR_LLAMA_SERVER` if installed elsewhere.
+GPU libraries. The installer always keeps the CPU backend and automatically
+adds CUDA 12.8 on x86-64 WSL when `nvidia-smi` can see an NVIDIA GPU. At
+startup, the interface verifies that CUDA can enumerate the GPU; if not, it
+uses CPU without requiring a launcher edit. Restart the interface after
+installation. The first Surya job also downloads the model weights; later
+jobs reuse them. Override the detected executables with `ARABIC_OCR_SURYA`
+and `ARABIC_OCR_LLAMA_SERVER` if installed elsewhere.
 
 ### OCR appears frozen
 
